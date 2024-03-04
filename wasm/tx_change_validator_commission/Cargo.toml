@@ -1,6 +1,6 @@
 [package]
 name = "tx_change_validator_commission"
-description = "WASM validator commission change transaction"
+description = "WASM trasaction to change validator commission"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "tx_change_validator_metadata"
-description = "WASM validator metadata change transaction"
+description = "WASM transaction to change validator metadata"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

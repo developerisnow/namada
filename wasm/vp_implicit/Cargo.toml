@@ -1,6 +1,6 @@
 [package]
 name = "vp_implicit"
-description = "Implicit account VP"
+description = "Implicit account valididity predicate."
 authors.workspace = true
 edition.workspace = true
 license.workspace = true

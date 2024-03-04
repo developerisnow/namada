@@ -1,6 +1,6 @@
 [package]
 name = "tx_become_validator"
-description = "WASM bond transaction"
+description = "WASM transaction to create a validator"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
