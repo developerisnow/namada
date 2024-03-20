@@ -22,10 +22,10 @@ clippy-fix:
 	$(cargo) +$(nightly) clippy --fix -Z unstable-options --workspace --allow-dirty --allow-staged
 
 fmt:
-	$(cargo) +$(nightly) fmt --workspace
+	$(cargo) +$(nightly) fmt
 
 fmt-check:
-	$(cargo) +$(nightly) fmt --workspace -- --check
+	$(cargo) +$(nightly) fmt --check
 
 test:
 	$(cargo) +$(nightly) test -- -Z unstable-options --report-time
