@@ -1000,6 +1000,7 @@ impl BenchShieldedCtx {
                 &StdIo,
                 1,
                 None,
+                None,
                 &[spending_key.into()],
                 &[],
             ))
@@ -1020,6 +1021,7 @@ impl BenchShieldedCtx {
                     &target,
                     &address::testing::nam(),
                     denominated_amount,
+                    true,
                 ),
             )
             .unwrap()

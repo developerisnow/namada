@@ -60,6 +60,9 @@ use namada_core::storage::{BlockHeight, Epoch, IndexedTx, TxIndex};
 use namada_core::time::{DateTimeUtc, DurationSecs};
 use namada_core::uint::Uint;
 use namada_ibc::IbcMessage;
+use namada_macros::BorshDeserializer;
+#[cfg(feature = "migrations")]
+use namada_migrations::*;
 use namada_token::{self as token, Denomination, MaspDigitPos, Transfer};
 use namada_tx::data::{TxResult, WrapperTx};
 use namada_tx::Tx;
@@ -116,7 +119,7 @@ pub type IndexedNoteEntry = (
 );
 
 /// Shielded transfer
-#[derive(Clone, Debug, BorshSerialize, BorshDeserialize)]
+#[derive(Clone, Debug, BorshSerialize, BorshDeserialize, BorshDeserializer)]
 pub struct ShieldedTransfer {
     /// Shielded transfer builder
     pub builder: Builder<(), (), ExtendedFullViewingKey, ()>,
@@ -129,7 +132,7 @@ pub struct ShieldedTransfer {
 }
 
 /// Shielded pool data for a token
-#[derive(BorshSerialize, BorshDeserialize)]
+#[derive(Debug, BorshSerialize, BorshDeserialize, BorshDeserializer)]
 pub struct MaspTokenRewardData {
     pub name: String,
     pub address: Address,
@@ -499,7 +502,7 @@ pub fn is_amount_required(src: I128Sum, dest: I128Sum, delta: I128Sum) -> bool {
 }
 
 /// a masp change
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, BorshDeserializer, Debug, Clone)]
 pub struct MaspChange {
     /// the token address
     pub asset: Address,
@@ -528,7 +531,9 @@ pub type TransactionDelta = HashMap<ViewingKey, I128Sum>;
 ///
 /// The cache is designed so that it either contains
 /// all transactions from a given height, or none.
-#[derive(BorshSerialize, BorshDeserialize, Debug, Default, Clone)]
+#[derive(
+    BorshSerialize, BorshDeserialize, BorshDeserializer, Debug, Default, Clone,
+)]
 pub struct Unscanned {
     txs: IndexedNoteData,
 }
@@ -697,10 +702,12 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
 
     /// Fetch the current state of the multi-asset shielded pool into a
     /// ShieldedContext
+    #[allow(clippy::too_many_arguments)]
     pub async fn fetch<C: Client + Sync, IO: Io>(
         &mut self,
         client: &C,
         logger: &impl ProgressLogger<IO>,
+        start_query_height: Option<BlockHeight>,
         last_query_height: Option<BlockHeight>,
         _batch_size: u64,
         sks: &[ExtendedSpendingKey],
@@ -739,6 +746,7 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
         // get the bounds on the block heights to fetch
         let start_idx =
             std::cmp::min(last_witnessed_tx, least_idx).map(|ix| ix.height);
+        let start_idx = start_query_height.or(start_idx);
         // Load all transactions accepted until this point
         // N.B. the cache is a hash map
         self.unscanned.extend(
@@ -1944,6 +1952,7 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
         target: &TransferTarget,
         token: &Address,
         amount: token::DenominatedAmount,
+        update_ctx: bool,
     ) -> Result<Option<ShieldedTransfer>, TransferErr> {
         // No shielded components are needed when neither source nor destination
         // are shielded
@@ -2291,13 +2300,15 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
         let (masp_tx, metadata) =
             builder.build(&prover, &FeeRule::non_standard(U64Sum::zero()))?;
 
-        // Cache the generated transfer
-        let mut shielded_ctx = context.shielded_mut().await;
-        shielded_ctx
-            .pre_cache_transaction(
-                context, &masp_tx, source, target, token, epoch,
-            )
-            .await?;
+        if update_ctx {
+            // Cache the generated transfer
+            let mut shielded_ctx = context.shielded_mut().await;
+            shielded_ctx
+                .pre_cache_transaction(
+                    context, &masp_tx, source, target, token, epoch,
+                )
+                .await?;
+        }
 
         Ok(Some(ShieldedTransfer {
             builder: builder_clone,
@@ -2393,7 +2404,7 @@ impl<U: ShieldedUtils + MaybeSend + MaybeSync> ShieldedContext<U> {
             .values()
             .map(|fvk| ExtendedFullViewingKey::from(*fvk).fvk.vk)
             .collect();
-        self.fetch(client, &DefaultLogger::new(io), None, 1, &[], &fvks)
+        self.fetch(client, &DefaultLogger::new(io), None, None, 1, &[], &fvks)
             .await?;
         // Save the update state so that future fetches can be short-circuited
         let _ = self.save().await;

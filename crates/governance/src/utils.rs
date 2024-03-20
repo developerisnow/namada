@@ -6,6 +6,9 @@ use namada_core::borsh::{BorshDeserialize, BorshSerialize};
 use namada_core::dec::Dec;
 use namada_core::storage::Epoch;
 use namada_core::token;
+use namada_macros::BorshDeserializer;
+#[cfg(feature = "migrations")]
+use namada_migrations::*;
 
 use super::cli::offline::OfflineVote;
 use super::storage::proposal::ProposalType;
@@ -35,7 +38,7 @@ impl Display for ProposalStatus {
 pub type VotePower = token::Amount;
 
 /// Structure rappresenting a proposal vote
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, BorshDeserializer)]
 pub struct Vote {
     /// Field holding the address of the validator
     pub validator: Address,
@@ -60,7 +63,9 @@ impl Vote {
 }
 
 /// Represent a tally type
-#[derive(Copy, Debug, Clone, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Copy, Debug, Clone, BorshSerialize, BorshDeserialize, BorshDeserializer,
+)]
 pub enum TallyType {
     /// Represent a tally type for proposal requiring 2/3 of the total voting
     /// power to be yay
@@ -90,7 +95,9 @@ impl TallyType {
 }
 
 /// The result of a proposal
-#[derive(Copy, Clone, Debug, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Copy, Clone, Debug, BorshSerialize, BorshDeserialize, BorshDeserializer,
+)]
 pub enum TallyResult {
     /// Proposal was accepted with the associated value
     Passed,
@@ -173,7 +180,9 @@ impl TallyResult {
 }
 
 /// The result with votes of a proposal
-#[derive(Clone, Copy, BorshDeserialize, BorshSerialize)]
+#[derive(
+    Clone, Debug, Copy, BorshDeserialize, BorshSerialize, BorshDeserializer,
+)]
 pub struct ProposalResult {
     /// The result of a proposal
     pub result: TallyResult,
@@ -432,8 +441,10 @@ pub fn compute_proposal_result(
     }
 }
 
-/// Calculate the valid voting window for validator given a proposal epoch
-/// details
+/// Calculate the valid voting window for a validator given proposal epoch
+/// details. The valid window is within 2/3 of the voting period.
+/// NOTE: technically the window can be more generous than 2/3 since the end
+/// epoch is a valid epoch for voting too.
 pub fn is_valid_validator_voting_period(
     current_epoch: Epoch,
     voting_start_epoch: Epoch,
@@ -442,9 +453,10 @@ pub fn is_valid_validator_voting_period(
     if voting_start_epoch >= voting_end_epoch {
         false
     } else {
-        let duration = voting_end_epoch - voting_start_epoch;
-        let two_third_duration = (duration / 3) * 2;
-        current_epoch <= voting_start_epoch + two_third_duration
+        // From e_cur <= e_start + 2/3 * (e_end - e_start)
+        let is_within_two_thirds =
+            3 * current_epoch <= voting_start_epoch + 2 * voting_end_epoch;
+        current_epoch >= voting_start_epoch && is_within_two_thirds
     }
 }
 
@@ -1347,7 +1359,7 @@ mod test {
     }
 
     #[test]
-    fn test_proposal_fifthteen() {
+    fn test_proposal_fifteen() {
         let mut proposal_votes = ProposalVotes::default();
 
         let validator_address = address::testing::established_address_1();
@@ -1400,5 +1412,45 @@ mod test {
         );
 
         assert!(!proposal_result.two_thirds_nay_over_two_thirds_total())
+    }
+
+    #[test]
+    fn test_validator_voting_period() {
+        assert!(!is_valid_validator_voting_period(
+            0.into(),
+            2.into(),
+            4.into()
+        ));
+        assert!(is_valid_validator_voting_period(
+            2.into(),
+            2.into(),
+            4.into()
+        ));
+        assert!(is_valid_validator_voting_period(
+            3.into(),
+            2.into(),
+            4.into()
+        ));
+        assert!(!is_valid_validator_voting_period(
+            4.into(),
+            2.into(),
+            4.into()
+        ));
+
+        assert!(is_valid_validator_voting_period(
+            3.into(),
+            2.into(),
+            5.into()
+        ));
+        assert!(is_valid_validator_voting_period(
+            4.into(),
+            2.into(),
+            5.into()
+        ));
+        assert!(!is_valid_validator_voting_period(
+            5.into(),
+            2.into(),
+            5.into()
+        ));
     }
 }

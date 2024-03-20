@@ -12,11 +12,13 @@
 //!     epoch can start
 //!   - `next_epoch_min_start_time`: minimum block time from which the next
 //!     epoch can start
-//!   - `replay_protection`: hashes of the processed transactions
+//!   - `update_epoch_blocks_delay`: number of missing blocks before updating
+//!     PoS with CometBFT
 //!   - `pred`: predecessor values of the top-level keys of the same name
 //!     - `tx_queue`
 //!     - `next_epoch_min_start_height`
 //!     - `next_epoch_min_start_time`
+//!     - `update_epoch_blocks_delay`
 //!   - `conversion_state`: MASP conversion state
 //! - `subspace`: accounts sub-spaces
 //!   - `{address}/{dyn}`: any byte data associated with accounts
@@ -61,10 +63,16 @@ use namada::replay_protection;
 use namada::state::merkle_tree::{base_tree_key_prefix, subtree_key_prefix};
 use namada::state::{
     BlockStateRead, BlockStateWrite, DBIter, DBWriteBatch, DbError as Error,
-    DbResult as Result, MerkleTreeStoresRead, PrefixIterator, StoreType, DB,
+    DbResult as Result, MerkleTreeStoresRead, PatternIterator, PrefixIterator,
+    StoreType, DB,
+};
+use namada::storage::{
+    DbColFam, BLOCK_CF, DIFFS_CF, REPLAY_PROTECTION_CF, STATE_CF, SUBSPACE_CF,
 };
 use namada::token::ConversionState;
+use namada_sdk::migrations::DBUpdateVisitor;
 use rayon::prelude::*;
+use regex::Regex;
 use rocksdb::{
     BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, DBCompactionStyle,
     DBCompressionType, Direction, FlushOptions, IteratorMode, Options,
@@ -78,13 +86,6 @@ use crate::config::utils::num_of_threads;
 /// Env. var to set a number of Rayon global worker threads
 const ENV_VAR_ROCKSDB_COMPACTION_THREADS: &str =
     "NAMADA_ROCKSDB_COMPACTION_THREADS";
-
-/// Column family names
-const SUBSPACE_CF: &str = "subspace";
-const DIFFS_CF: &str = "diffs";
-const STATE_CF: &str = "state";
-const BLOCK_CF: &str = "block";
-const REPLAY_PROTECTION_CF: &str = "replay_protection";
 
 const OLD_DIFF_PREFIX: &str = "old";
 const NEW_DIFF_PREFIX: &str = "new";
@@ -515,6 +516,7 @@ impl RocksDB {
         for metadata_key in [
             "next_epoch_min_start_height",
             "next_epoch_min_start_time",
+            "update_epoch_blocks_delay",
             "tx_queue",
         ] {
             let previous_key = format!("pred/{}", metadata_key);
@@ -528,7 +530,7 @@ impl RocksDB {
             // NOTE: we cannot restore the "pred/" keys themselves since we
             // don't have their predecessors in storage, but there's no need to
             // since we cannot do more than one rollback anyway because of
-            // Tendermint.
+            // CometBFT.
         }
 
         // Revert conversion state if the epoch had been changed
@@ -549,11 +551,30 @@ impl RocksDB {
         tracing::info!("Removing last block results");
         batch.delete_cf(block_cf, format!("results/{}", last_block.height));
 
-        // Delete the tx hashes included in the last block
+        // Restore the state of replay protection to the last block
         let reprot_cf = self.get_column_family(REPLAY_PROTECTION_CF)?;
-        tracing::info!("Removing replay protection hashes");
-        batch
-            .delete_cf(reprot_cf, replay_protection::last_prefix().to_string());
+        tracing::info!("Restoring replay protection state");
+        // Remove the "last" tx hashes
+        for (ref hash_str, _, _) in self.iter_replay_protection() {
+            let hash = namada::core::hash::Hash::from_str(hash_str)
+                .expect("Failed hash conversion");
+            let key = replay_protection::last_key(&hash);
+            batch.delete_cf(reprot_cf, key.to_string());
+        }
+
+        for (ref hash_str, _, _) in self.iter_replay_protection_buffer() {
+            let hash = namada::core::hash::Hash::from_str(hash_str)
+                .expect("Failed hash conversion");
+            let last_key = replay_protection::last_key(&hash);
+            // Restore "buffer" bucket to "last"
+            batch.put_cf(reprot_cf, last_key.to_string(), vec![]);
+
+            // Remove anything in the buffer from the "all" prefix. Note that
+            // some hashes might be missing from "all" if they have been
+            // deleted, this is fine, in this case just continue
+            let all_key = replay_protection::all_key(&hash);
+            batch.delete_cf(reprot_cf, all_key.to_string());
+        }
 
         // Execute next step in parallel
         let batch = Mutex::new(batch);
@@ -1533,9 +1554,179 @@ impl DB for RocksDB {
 
         Ok(())
     }
+
+    fn prune_replay_protection_buffer(
+        &mut self,
+        batch: &mut Self::WriteBatch,
+    ) -> Result<()> {
+        let replay_protection_cf =
+            self.get_column_family(REPLAY_PROTECTION_CF)?;
+
+        for (ref hash_str, _, _) in self.iter_replay_protection_buffer() {
+            let hash = namada::core::hash::Hash::from_str(hash_str)
+                .expect("Failed hash conversion");
+            let key = replay_protection::buffer_key(&hash);
+            batch.0.delete_cf(replay_protection_cf, key.to_string());
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    fn overwrite_entry(
+        &self,
+        batch: &mut Self::WriteBatch,
+        height: Option<BlockHeight>,
+        cf: &DbColFam,
+        key: &Key,
+        new_value: impl AsRef<[u8]>,
+    ) -> Result<()> {
+        let last_height: BlockHeight = {
+            let state_cf = self.get_column_family(STATE_CF)?;
+
+            decode(
+                self.0
+                    .get_cf(state_cf, "height")
+                    .map_err(|e| Error::DBError(e.to_string()))?
+                    .ok_or_else(|| {
+                        Error::DBError("No block height found".to_string())
+                    })?,
+            )
+            .map_err(|e| {
+                Error::DBError(format!("Unable to decode block height: {e}"))
+            })?
+        };
+        let desired_height = height.unwrap_or(last_height);
+
+        if desired_height != last_height {
+            todo!(
+                "Overwriting values at heights different than the last \
+                 committed height hast yet to be implemented"
+            );
+        }
+        // NB: the following code only updates values
+        // written to at the last committed height
+
+        let val = new_value.as_ref();
+
+        // Write the new key-val in the Db column family
+        let cf_name = self.get_column_family(cf.to_str())?;
+        batch.0.put_cf(cf_name, key.to_string(), val);
+
+        // If the CF is subspace, additionally update the diffs
+        if cf == &DbColFam::SUBSPACE {
+            let diffs_cf = self.get_column_family(DIFFS_CF)?;
+            let diffs_key = Key::from(last_height.to_db_key())
+                .with_segment("new".to_owned())
+                .join(key)
+                .to_string();
+
+            batch.0.put_cf(diffs_cf, diffs_key, val);
+        }
+
+        Ok(())
+    }
+}
+
+/// A struct that can visit a set of updates,
+/// registering them all in the batch
+pub struct RocksDBUpdateVisitor<'db> {
+    db: &'db RocksDB,
+    batch: RocksDBWriteBatch,
+}
+
+impl<'db> RocksDBUpdateVisitor<'db> {
+    pub fn new(db: &'db RocksDB) -> Self {
+        Self {
+            db,
+            batch: Default::default(),
+        }
+    }
+
+    pub fn take_batch(self) -> RocksDBWriteBatch {
+        self.batch
+    }
+}
+
+impl<'db> DBUpdateVisitor for RocksDBUpdateVisitor<'db> {
+    fn read(&self, key: &Key, cf: &DbColFam) -> Option<Vec<u8>> {
+        match cf {
+            DbColFam::SUBSPACE => self
+                .db
+                .read_subspace_val(key)
+                .expect("Failed to read from storage"),
+            _ => {
+                let cf_str = cf.to_str();
+                let cf = self
+                    .db
+                    .get_column_family(cf_str)
+                    .expect("Failed to read column family from storage");
+                self.db
+                    .0
+                    .get_cf(cf, key.to_string())
+                    .expect("Failed to get key from storage")
+            }
+        }
+    }
+
+    fn write(&mut self, key: &Key, cf: &DbColFam, value: impl AsRef<[u8]>) {
+        self.db
+            .overwrite_entry(&mut self.batch, None, cf, key, value)
+            .expect("Failed to overwrite a key in storage")
+    }
+
+    fn delete(&mut self, key: &Key, cf: &DbColFam) {
+        let last_height: BlockHeight = {
+            let state_cf = self.db.get_column_family(STATE_CF).unwrap();
+
+            decode(
+                self.db
+                    .0
+                    .get_cf(state_cf, "height")
+                    .map_err(|e| Error::DBError(e.to_string()))
+                    .unwrap()
+                    .ok_or_else(|| {
+                        Error::DBError("No block height found".to_string())
+                    })
+                    .unwrap(),
+            )
+            .map_err(|e| {
+                Error::DBError(format!("Unable to decode block height: {e}"))
+            })
+            .unwrap()
+        };
+        match cf {
+            DbColFam::SUBSPACE => {
+                self.db
+                    .batch_delete_subspace_val(
+                        &mut self.batch,
+                        last_height,
+                        key,
+                        true,
+                    )
+                    .expect("Failed to delete key from storage");
+            }
+            _ => {
+                let cf_str = cf.to_str();
+                let cf = self
+                    .db
+                    .get_column_family(cf_str)
+                    .expect("Failed to get read column family from storage");
+                self.batch.0.delete_cf(cf, key.to_string());
+            }
+        };
+    }
+
+    fn get_pattern(&self, pattern: Regex) -> Vec<(String, Vec<u8>)> {
+        self.db
+            .iter_pattern(None, pattern)
+            .map(|(k, v, _)| (k, v))
+            .collect()
+    }
 }
 
 impl<'iter> DBIter<'iter> for RocksDB {
+    type PatternIter = PersistentPatternIterator<'iter>;
     type PrefixIter = PersistentPrefixIterator<'iter>;
 
     fn iter_prefix(
@@ -1543,6 +1734,14 @@ impl<'iter> DBIter<'iter> for RocksDB {
         prefix: Option<&Key>,
     ) -> PersistentPrefixIterator<'iter> {
         iter_subspace_prefix(self, prefix)
+    }
+
+    fn iter_pattern(
+        &'iter self,
+        prefix: Option<&Key>,
+        pattern: Regex,
+    ) -> PersistentPatternIterator<'iter> {
+        iter_subspace_pattern(self, prefix, pattern)
     }
 
     fn iter_results(&'iter self) -> PersistentPrefixIterator<'iter> {
@@ -1585,6 +1784,15 @@ impl<'iter> DBIter<'iter> for RocksDB {
         let stripped_prefix = Some(replay_protection::last_prefix());
         iter_prefix(self, replay_protection_cf, stripped_prefix.as_ref(), None)
     }
+
+    fn iter_replay_protection_buffer(&'iter self) -> Self::PrefixIter {
+        let replay_protection_cf = self
+            .get_column_family(REPLAY_PROTECTION_CF)
+            .expect("{REPLAY_PROTECTION_CF} column family should exist");
+
+        let stripped_prefix = Some(replay_protection::buffer_prefix());
+        iter_prefix(self, replay_protection_cf, stripped_prefix.as_ref(), None)
+    }
 }
 
 fn iter_subspace_prefix<'iter>(
@@ -1596,6 +1804,18 @@ fn iter_subspace_prefix<'iter>(
         .expect("{SUBSPACE_CF} column family should exist");
     let stripped_prefix = None;
     iter_prefix(db, subspace_cf, stripped_prefix, prefix)
+}
+
+fn iter_subspace_pattern<'iter>(
+    db: &'iter RocksDB,
+    prefix: Option<&Key>,
+    pattern: Regex,
+) -> PersistentPatternIterator<'iter> {
+    let subspace_cf = db
+        .get_column_family(SUBSPACE_CF)
+        .expect("{SUBSPACE_CF} column family should exist");
+    let stripped_prefix = None;
+    iter_pattern(db, subspace_cf, stripped_prefix, prefix, pattern)
 }
 
 fn iter_diffs_prefix<'a>(
@@ -1650,6 +1870,23 @@ fn iter_prefix<'a>(
     PersistentPrefixIterator(PrefixIterator::new(iter, stripped_prefix))
 }
 
+/// Create an iterator over key-vals in the given CF matching the given
+/// pattern(s).
+fn iter_pattern<'a>(
+    db: &'a RocksDB,
+    cf: &'a ColumnFamily,
+    stripped_prefix: Option<&Key>,
+    prefix: Option<&Key>,
+    pattern: Regex,
+) -> PersistentPatternIterator<'a> {
+    PersistentPatternIterator {
+        inner: PatternIterator {
+            iter: iter_prefix(db, cf, stripped_prefix, prefix),
+            pattern,
+        },
+    }
+}
+
 #[derive(Debug)]
 pub struct PersistentPrefixIterator<'a>(
     PrefixIterator<rocksdb::DBIterator<'a>>,
@@ -1679,6 +1916,25 @@ impl<'a> Iterator for PersistentPrefixIterator<'a> {
                     }
                 }
                 None => return None,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PersistentPatternIterator<'a> {
+    inner: PatternIterator<PersistentPrefixIterator<'a>>,
+}
+
+impl<'a> Iterator for PersistentPatternIterator<'a> {
+    type Item = (String, Vec<u8>, u64);
+
+    /// Returns the next pair and the gas cost
+    fn next(&mut self) -> Option<(String, Vec<u8>, u64)> {
+        loop {
+            let next_result = self.inner.iter.next()?;
+            if self.inner.pattern.is_match(&next_result.0) {
+                return Some(next_result);
             }
         }
     }
@@ -1784,9 +2040,8 @@ mod imp {
 
 #[cfg(test)]
 mod test {
-    use namada::core::address::{
-        gen_established_address, EstablishedAddressGen,
-    };
+    use namada::core::address::EstablishedAddressGen;
+    use namada::core::hash::Hash;
     use namada::core::storage::{BlockHash, Epochs};
     use namada::state::{MerkleTree, Sha256Hasher};
     use tempfile::tempdir;
@@ -1997,10 +2252,7 @@ mod test {
         let height_0 = BlockHeight(100);
         let mut pred_epochs = Epochs::default();
         pred_epochs.new_epoch(height_0);
-        let mut conversion_state_0 = ConversionState::default();
-        conversion_state_0
-            .tokens
-            .insert("dummy1".to_string(), gen_established_address("test"));
+        let conversion_state_0 = ConversionState::default();
         let to_delete_val = vec![1_u8, 1, 0, 0];
         let to_overwrite_val = vec![1_u8, 1, 1, 0];
         db.batch_write_subspace_val(
@@ -2019,6 +2271,26 @@ mod test {
             true,
         )
         .unwrap();
+        for tx in [b"tx1", b"tx2"] {
+            db.write_replay_protection_entry(
+                &mut batch,
+                &replay_protection::all_key(&Hash::sha256(tx)),
+            )
+            .unwrap();
+            db.write_replay_protection_entry(
+                &mut batch,
+                &replay_protection::buffer_key(&Hash::sha256(tx)),
+            )
+            .unwrap();
+        }
+
+        for tx in [b"tx3", b"tx4"] {
+            db.write_replay_protection_entry(
+                &mut batch,
+                &replay_protection::last_key(&Hash::sha256(tx)),
+            )
+            .unwrap();
+        }
 
         add_block_to_batch(
             &db,
@@ -2035,10 +2307,7 @@ mod test {
         let mut batch = RocksDB::batch();
         let height_1 = BlockHeight(101);
         pred_epochs.new_epoch(height_1);
-        let mut conversion_state_1 = ConversionState::default();
-        conversion_state_1
-            .tokens
-            .insert("dummy2".to_string(), gen_established_address("test"));
+        let conversion_state_1 = ConversionState::default();
         let add_val = vec![1_u8, 0, 0, 0];
         let overwrite_val = vec![1_u8, 1, 1, 1];
         db.batch_write_subspace_val(
@@ -2055,6 +2324,34 @@ mod test {
         .unwrap();
         db.batch_delete_subspace_val(&mut batch, height_1, &delete_key, true)
             .unwrap();
+
+        db.prune_replay_protection_buffer(&mut batch).unwrap();
+        db.write_replay_protection_entry(
+            &mut batch,
+            &replay_protection::all_key(&Hash::sha256(b"tx3")),
+        )
+        .unwrap();
+
+        for tx in [b"tx3", b"tx4"] {
+            db.delete_replay_protection_entry(
+                &mut batch,
+                &replay_protection::last_key(&Hash::sha256(tx)),
+            )
+            .unwrap();
+            db.write_replay_protection_entry(
+                &mut batch,
+                &replay_protection::buffer_key(&Hash::sha256(tx)),
+            )
+            .unwrap();
+        }
+
+        for tx in [b"tx5", b"tx6"] {
+            db.write_replay_protection_entry(
+                &mut batch,
+                &replay_protection::last_key(&Hash::sha256(tx)),
+            )
+            .unwrap();
+        }
 
         add_block_to_batch(
             &db,
@@ -2075,6 +2372,14 @@ mod test {
         let deleted = db.read_subspace_val(&delete_key).unwrap();
         assert_eq!(deleted, None);
 
+        for tx in [b"tx1", b"tx2", b"tx3", b"tx5", b"tx6"] {
+            assert!(db.has_replay_protection_entry(&Hash::sha256(tx)).unwrap());
+        }
+        assert!(
+            !db.has_replay_protection_entry(&Hash::sha256(b"tx4"))
+                .unwrap()
+        );
+
         // Rollback to the first block height
         db.rollback(height_0).unwrap();
 
@@ -2092,6 +2397,15 @@ mod test {
                 .unwrap()
                 .unwrap();
         assert_eq!(conversion_state, encode(&conversion_state_0));
+        for tx in [b"tx1", b"tx2", b"tx3", b"tx4"] {
+            assert!(db.has_replay_protection_entry(&Hash::sha256(tx)).unwrap());
+        }
+
+        for tx in [b"tx5", b"tx6"] {
+            assert!(
+                !db.has_replay_protection_entry(&Hash::sha256(tx)).unwrap()
+            );
+        }
     }
 
     #[test]

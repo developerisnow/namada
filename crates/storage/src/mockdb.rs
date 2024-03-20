@@ -10,8 +10,8 @@ use itertools::Either;
 use namada_core::borsh::{BorshDeserialize, BorshSerializeExt};
 use namada_core::hash::Hash;
 use namada_core::storage::{
-    BlockHeight, BlockResults, Epoch, EthEventsQueue, Header, Key, KeySeg,
-    KEY_SEGMENT_SEPARATOR,
+    BlockHeight, BlockResults, DbColFam, Epoch, EthEventsQueue, Header, Key,
+    KeySeg, KEY_SEGMENT_SEPARATOR,
 };
 use namada_core::time::DateTimeUtc;
 use namada_core::{decode, encode, ethereum_events, ethereum_structs};
@@ -19,13 +19,14 @@ use namada_merkle_tree::{
     base_tree_key_prefix, subtree_key_prefix, MerkleTreeStoresRead, StoreType,
 };
 use namada_replay_protection as replay_protection;
+use regex::Regex;
 
 use crate::conversion_state::ConversionState;
 use crate::db::{
     BlockStateRead, BlockStateWrite, DBIter, DBWriteBatch, Error, Result, DB,
 };
 use crate::tx_queue::TxQueue;
-use crate::types::{KVBytes, PrefixIterator};
+use crate::types::{KVBytes, PatternIterator, PrefixIterator};
 
 const SUBSPACE_CF: &str = "subspace";
 
@@ -674,9 +675,36 @@ impl DB for MockDB {
 
         Ok(())
     }
+
+    fn prune_replay_protection_buffer(
+        &mut self,
+        _batch: &mut Self::WriteBatch,
+    ) -> Result<()> {
+        let buffer_key = Key::parse("replay_protection")
+            .map_err(Error::KeyError)?
+            .push(&"buffer".to_string())
+            .map_err(Error::KeyError)?;
+        self.0
+            .borrow_mut()
+            .retain(|key, _| !key.starts_with(&buffer_key.to_string()));
+
+        Ok(())
+    }
+
+    fn overwrite_entry(
+        &self,
+        _batch: &mut Self::WriteBatch,
+        _height: Option<BlockHeight>,
+        _cf: &DbColFam,
+        _key: &Key,
+        _new_value: impl AsRef<[u8]>,
+    ) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 impl<'iter> DBIter<'iter> for MockDB {
+    type PatternIter = MockPatternIterator;
     type PrefixIter = MockPrefixIterator;
 
     fn iter_prefix(&'iter self, prefix: Option<&Key>) -> MockPrefixIterator {
@@ -697,6 +725,20 @@ impl<'iter> DBIter<'iter> for MockDB {
         );
         let iter = self.0.borrow().clone().into_iter();
         MockPrefixIterator::new(MockIterator { prefix, iter }, stripped_prefix)
+    }
+
+    fn iter_pattern(
+        &'iter self,
+        prefix: Option<&Key>,
+        pattern: Regex,
+    ) -> Self::PatternIter {
+        MockPatternIterator {
+            inner: PatternIterator {
+                iter: self.iter_prefix(prefix),
+                pattern,
+            },
+            finished: false,
+        }
     }
 
     fn iter_results(&'iter self) -> MockPrefixIterator {
@@ -755,6 +797,16 @@ impl<'iter> DBIter<'iter> for MockDB {
         let iter = self.0.borrow().clone().into_iter();
         MockPrefixIterator::new(MockIterator { prefix, iter }, stripped_prefix)
     }
+
+    fn iter_replay_protection_buffer(&'iter self) -> Self::PrefixIter {
+        let stripped_prefix = format!(
+            "replay_protection/{}/",
+            replay_protection::buffer_prefix()
+        );
+        let prefix = stripped_prefix.clone();
+        let iter = self.0.borrow().clone().into_iter();
+        MockPrefixIterator::new(MockIterator { prefix, iter }, stripped_prefix)
+    }
 }
 
 /// A prefix iterator base for the [`MockPrefixIterator`].
@@ -804,6 +856,31 @@ impl Iterator for PrefixIterator<MockIterator> {
                 }
             }
             None => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MockPatternIterator {
+    inner: PatternIterator<MockPrefixIterator>,
+    finished: bool,
+}
+
+impl Iterator for MockPatternIterator {
+    type Item = (String, Vec<u8>, u64);
+
+    /// Returns the next pair and the gas cost
+    fn next(&mut self) -> Option<(String, Vec<u8>, u64)> {
+        if self.finished {
+            return None;
+        }
+        loop {
+            let next_result = self.inner.iter.next()?;
+            if self.inner.pattern.is_match(&next_result.0) {
+                return Some(next_result);
+            } else {
+                self.finished = true;
+            }
         }
     }
 }

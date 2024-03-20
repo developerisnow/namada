@@ -48,7 +48,9 @@ use super::helpers::{
     get_height, get_pregenesis_wallet, wait_for_block_height,
     wait_for_wasm_pre_compile,
 };
-use super::setup::{get_all_wasms_hashes, set_ethereum_bridge_mode, NamadaCmd};
+use super::setup::{
+    get_all_wasms_hashes, set_ethereum_bridge_mode, working_dir, NamadaCmd,
+};
 use crate::e2e::helpers::{
     epoch_sleep, find_address, find_bonded_stake, get_actor_rpc, get_epoch,
     is_debug_mode, parse_reached_epoch,
@@ -340,6 +342,77 @@ fn run_ledger_load_state_and_reset() -> Result<()> {
     // There should be no previous state
     session.exp_string("No state could be found")?;
 
+    Ok(())
+}
+
+/// This test makes sure the tool for migrating the DB
+/// during a hard-fork works correctly.
+///
+/// 1. Run the ledger node, halting at height 2
+/// 2. Update the db
+/// 3. Run the ledger node, halting at height 4
+/// 4. restart ledge with migrated db
+/// 5. Check that a key was changed successfully
+#[test]
+fn test_db_migration() -> Result<()> {
+    let test = setup::single_node_net()?;
+
+    set_ethereum_bridge_mode(
+        &test,
+        &test.net.chain_id,
+        Who::Validator(0),
+        ethereum_bridge::ledger::Mode::Off,
+        None,
+    );
+
+    // 1. Run the ledger node, halting at height 2
+    let mut ledger = run_as!(
+        test,
+        Who::Validator(0),
+        Bin::Node,
+        &["ledger", "run-until", "--block-height", "2", "--halt",],
+        Some(40)
+    )?;
+    // Wait to commit a block
+    ledger.exp_string("Reached block height 2, halting the chain.")?;
+    ledger.exp_string(LEDGER_SHUTDOWN)?;
+    ledger.exp_eof()?;
+    drop(ledger);
+    let migrations_json_path = working_dir()
+        .join("examples")
+        .join("migration_example.json");
+    // 2. Update the db
+    let mut session = run_as!(
+        test,
+        Who::Validator(0),
+        Bin::Node,
+        &[
+            "ledger",
+            "update-db",
+            "--path",
+            migrations_json_path.to_string_lossy().as_ref(),
+        ],
+        Some(30),
+    )?;
+    session.exp_eof()?;
+
+    let mut ledger =
+        run_as!(test, Who::Validator(0), Bin::Node, &["ledger"], Some(40))?;
+    ledger.exp_regex(r"Committed block hash.*, height: [0-9]+")?;
+    // 5. Check that a key was changed successfully
+    let mut query = run_as!(
+        test,
+        Who::Validator(0),
+        Bin::Client,
+        &[
+            "balance",
+            "--owner",
+            "tnam1q9rhgyv3ydq0zu3whnftvllqnvhvhm270qxay5tn"
+        ],
+        Some(20),
+    )?;
+    query.exp_regex("nam: 3200000036910")?;
+    ledger.interrupt()?;
     Ok(())
 }
 
@@ -2705,7 +2778,7 @@ fn proposal_offline() -> Result<()> {
     Ok(())
 }
 
-fn write_json_file<T>(proposal_path: &std::path::Path, proposal_content: T)
+pub fn write_json_file<T>(proposal_path: &std::path::Path, proposal_content: T)
 where
     T: Serialize,
 {
@@ -4140,4 +4213,93 @@ where
     }
 
     Ok(result)
+}
+
+#[test]
+fn rollback() -> Result<()> {
+    let test = setup::network(
+        |genesis, base_dir| {
+            setup::set_validators(1, genesis, base_dir, default_port_offset)
+        },
+        // slow block production rate
+        Some("5s"),
+    )?;
+    set_ethereum_bridge_mode(
+        &test,
+        &test.net.chain_id,
+        Who::Validator(0),
+        ethereum_bridge::ledger::Mode::Off,
+        None,
+    );
+
+    // 1. Run the ledger node once
+    let mut ledger =
+        start_namada_ledger_node_wait_wasm(&test, Some(0), Some(40))?;
+
+    let validator_one_rpc = get_actor_rpc(&test, Who::Validator(0));
+
+    // wait for a commited block
+    ledger.exp_regex("Committed block hash: .*,")?;
+
+    let ledger = ledger.background();
+
+    // send a few transactions
+    let txs_args = vec![vec![
+        "transfer",
+        "--source",
+        BERTHA,
+        "--target",
+        ALBERT,
+        "--token",
+        NAM,
+        "--amount",
+        "10.1",
+        "--signing-keys",
+        BERTHA_KEY,
+        "--node",
+        &validator_one_rpc,
+    ]];
+
+    for tx_args in &txs_args {
+        let mut client = run!(test, Bin::Client, tx_args, Some(40))?;
+        client.exp_string(TX_APPLIED_SUCCESS)?;
+        client.assert_success();
+    }
+
+    // shut the ledger down
+    let mut ledger = ledger.foreground();
+    ledger.interrupt()?;
+    drop(ledger);
+
+    // restart and take the app hash + height
+    // TODO: check that the height matches the one at which the last transaction
+    // was applied
+    let mut ledger = start_namada_ledger_node(&test, Some(0), Some(40))?;
+    let (_, matched_one) =
+        ledger.exp_regex("Last state root hash: .*, height: .*")?;
+
+    // wait for a block and stop the ledger
+    ledger.exp_regex("Committed block hash: .*,")?;
+    ledger.interrupt()?;
+    drop(ledger);
+
+    // run rollback
+    let mut rollback = run_as!(
+        test,
+        Who::Validator(0),
+        Bin::Node,
+        &["ledger", "rollback"],
+        Some(40)
+    )?;
+    rollback.exp_eof().unwrap();
+
+    // restart ledger and check that the app hash is the same as before the
+    // rollback
+    let mut ledger = start_namada_ledger_node(&test, Some(0), Some(40))?;
+    let (_, matched_two) =
+        ledger.exp_regex("Last state root hash: .*, height: .*")?;
+
+    assert_eq!(matched_one, matched_two);
+
+    Ok(())
 }

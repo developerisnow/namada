@@ -77,6 +77,7 @@ use crate::config::{self, genesis, TendermintMode, ValidatorLocalConfig};
 use crate::facade::tendermint::v0_37::abci::{request, response};
 use crate::facade::tendermint::{self, validator};
 use crate::facade::tendermint_proto::v0_37::crypto::public_key;
+use crate::node::ledger;
 use crate::node::ledger::shims::abcipp_shim_types::shim;
 use crate::node::ledger::shims::abcipp_shim_types::shim::response::TxResult;
 use crate::node::ledger::{storage, tendermint_node};
@@ -357,8 +358,11 @@ where
 /// Merkle tree storage key filter. Return `false` for keys that shouldn't be
 /// merklized.
 pub fn is_merklized_storage_key(key: &namada_sdk::storage::Key) -> bool {
-    !token::storage_key::is_masp_key(key)
-        && !namada::ibc::storage::is_ibc_counter_key(key)
+    !(token::storage_key::is_masp_key(key)
+        && *key != token::storage_key::masp_convert_anchor_key()
+        && *key != token::storage_key::masp_token_map_key()
+        && *key != token::storage_key::masp_assets_hash_key()
+        || namada::ibc::storage::is_ibc_counter_key(key))
 }
 
 /// Channels for communicating with an Ethereum oracle.
@@ -551,6 +555,15 @@ where
     /// Load the Merkle root hash and the height of the last committed block, if
     /// any. This is returned when ABCI sends an `info` request.
     pub fn last_state(&mut self) -> response::Info {
+        if ledger::migrating_state().is_some() {
+            // When migrating state, return a height of 0, such
+            // that CometBFT calls InitChain and subsequently
+            // updates the apphash in its state.
+            return response::Info {
+                last_block_height: 0u32.into(),
+                ..response::Info::default()
+            };
+        }
         let mut response = response::Info {
             last_block_height: tendermint::block::Height::from(0_u32),
             ..Default::default()
