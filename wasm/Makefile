@@ -13,19 +13,19 @@ debug:
 	cp target/wasm32-unknown-unknown/debug/*.wasm .
 
 check:
-	$(cargo) +$(nightly) check --target wasm32-unknown-unknown
+	$(cargo) +$(nightly) check --workspace --target wasm32-unknown-unknown
 
 clippy:
-	$(cargo) +$(nightly) clippy --all-targets -- -D warnings
+	$(cargo) +$(nightly) clippy --workspace -- -D warnings
 
 clippy-fix:
-	$(cargo) +$(nightly) clippy --fix -Z unstable-options --all-targets --allow-dirty --allow-staged
+	$(cargo) +$(nightly) clippy --fix -Z unstable-options --workspace --allow-dirty --allow-staged
 
 fmt:
-	$(cargo) +$(nightly) fmt --all
+	$(cargo) +$(nightly) fmt --workspace
 
 fmt-check:
-	$(cargo) +$(nightly) fmt --all -- --check
+	$(cargo) +$(nightly) fmt --workspace -- --check
 
 test:
 	$(cargo) +$(nightly) test -- -Z unstable-options --report-time
