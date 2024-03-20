@@ -19,8 +19,6 @@ nightly := $(shell cat rust-nightly-version)
 # Path to the wasm source for the provided txs and VPs
 wasms := wasm
 wasms_for_tests := wasm_for_tests/wasm_source
-# Paths for all the wasm templates
-wasm_templates := wasm/tx_template wasm/vp_template
 
 ifdef JOBS
 jobs := -j $(JOBS)
@@ -92,8 +90,7 @@ check-wasm = $(cargo) check --target wasm32-unknown-unknown --manifest-path $(wa
 check:
 	$(cargo) check --workspace && \
 	make -C $(wasms) check && \
-	make -C $(wasms_for_tests) check && \
-	$(foreach wasm,$(wasm_templates),$(check-wasm) && ) true
+	make -C $(wasms_for_tests) check
 
 check-mainnet:
 	$(cargo) check --workspace --features "mainnet"
@@ -111,8 +108,7 @@ clippy-wasm = $(cargo) +$(nightly) clippy --manifest-path $(wasm)/Cargo.toml --a
 clippy:
 	$(cargo) +$(nightly) clippy $(jobs) --all-targets -- -D warnings && \
 	make -C $(wasms) clippy && \
-	make -C $(wasms_for_tests) clippy && \
-	$(foreach wasm,$(wasm_templates),$(clippy-wasm) && ) true
+	make -C $(wasms_for_tests) clippy
 
 clippy-mainnet:
 	$(cargo) +$(nightly) clippy --all-targets --features "mainnet" -- -D warnings
@@ -244,15 +240,11 @@ test-pos-sm:
 
 fmt-wasm = $(cargo) +$(nightly) fmt --manifest-path $(wasm)/Cargo.toml
 fmt:
-	$(cargo) +$(nightly) fmt --all && \
-	make -C $(wasms) fmt && \
-	$(foreach wasm,$(wasm_templates),$(fmt-wasm) && ) true
+	$(cargo) +$(nightly) fmt --all && make -C $(wasms) fmt
 
 fmt-check-wasm = $(cargo) +$(nightly) fmt --manifest-path $(wasm)/Cargo.toml -- --check
 fmt-check:
-	$(cargo) +$(nightly) fmt --all -- --check && \
-	make -C $(wasms) fmt-check && \
-	$(foreach wasm,$(wasm_templates),$(fmt-check-wasm) && ) true
+	$(cargo) +$(nightly) fmt --all -- --check && make -C $(wasms) fmt-check
 
 watch:
 	$(cargo) watch
