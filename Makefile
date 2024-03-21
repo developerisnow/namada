@@ -98,7 +98,7 @@ check-mainnet:
 # Check that every crate can be built with default features and that namada crate
 # can be built for wasm
 check-crates:
-	rustup target add --toolchain +$(nightly) wasm32-unknown-unknown
+	rustup target add --toolchain $(nightly) wasm32-unknown-unknown
 	$(foreach p,$(crates), echo "Checking $(p)" && cargo +$(nightly) check -Z unstable-options --tests -p $(p) && ) \
 		make -C $(wasms) check && \
 		make -C $(wasms_for_tests) check && \
