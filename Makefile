@@ -18,7 +18,7 @@ nightly := $(shell cat rust-nightly-version)
 
 # Path to the wasm source for the provided txs and VPs
 wasms := wasm
-wasms_for_tests := wasm_for_tests/wasm_source
+wasms_for_tests := wasm_for_tests
 
 ifdef JOBS
 jobs := -j $(JOBS)
@@ -273,7 +273,7 @@ debug-wasm-scripts-docker: build-wasm-image-docker
 
 # Build the validity predicate and transactions wasm
 build-wasm-scripts:
-	rm wasm/*.wasm || true
+	rm $(wasms)/*.wasm || true
 	make -C $(wasms)
 	make opt-wasm
 	make checksum-wasm
@@ -285,6 +285,18 @@ debug-wasm-scripts:
 	make opt-wasm
 	make checksum-wasm
 
+# Build the validity predicate and transactions wasm for tests
+build-wasm-tests-scripts:
+	rm $(wasms_for_tests)/*.wasm || true
+	make -C $(wasms_for_tests)
+	make opt-wasm-tests
+
+# Debug build the validity predicate and transactions wasm for tests
+debug-wasm-tests-scripts:
+	rm $(wasms_for_tests)/*.wasm || true
+	make -C $(wasms_for_tests) debug
+	make opt-wasm-tests
+
 # need python
 checksum-wasm:
 	python3 wasm/checksums.py
@@ -292,6 +304,9 @@ checksum-wasm:
 # this command needs wasm-opt installed
 opt-wasm:
 	@for file in $(shell ls wasm/*.wasm); do wasm-opt -Oz -o $${file} $${file}; done
+
+opt-wasm-tests:
+	@for file in $(shell ls wasm_for_tests/*.wasm); do wasm-opt -Oz -o $${file} $${file}; done
 
 clean-wasm-scripts:
 	make -C $(wasms) clean
