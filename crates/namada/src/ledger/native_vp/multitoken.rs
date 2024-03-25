@@ -145,6 +145,16 @@ where
         all_tokens.extend(dec_mints.keys().cloned());
 
         all_tokens.iter().try_for_each(|token| {
+            if token.is_internal() && !verifiers.contains(token) {
+                // Established address tokens do not have VPs themselves, their
+                // validation is handled by the `Multitoken` internal address,
+                // but internal token addresses have to verify the transfer
+                return Err(native_vp::Error::new_alloc(format!(
+                    "Token {token} must verify the tx"
+                ))
+                .into());
+            }
+
             let inc_change =
                 inc_changes.get(token).cloned().unwrap_or_default();
             let dec_change =
@@ -422,6 +432,8 @@ mod tests {
         let mut verifiers = BTreeSet::new();
         // for the minter
         verifiers.insert(minter);
+        // The token must be part of the verifier set (checked by MultitokenVp)
+        verifiers.insert(token);
         let ctx = Ctx::new(
             &ADDRESS,
             &state,
