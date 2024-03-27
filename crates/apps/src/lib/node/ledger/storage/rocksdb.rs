@@ -1555,6 +1555,26 @@ impl DB for RocksDB {
         Ok(())
     }
 
+    fn prune_non_persisted_diffs(
+        &mut self,
+        batch: &mut Self::WriteBatch,
+        height: BlockHeight,
+    ) -> Result<()> {
+        let subspace_cf = self.get_column_family(SUBSPACE_CF)?;
+        let rollback_cf = self.get_column_family(ROLLBACK_CF)?;
+        for (key_str, _val, _) in
+            iter_diffs_prefix(self, rollback_cf, height, None, true)
+        {
+            batch.0.delete_cf(subspace_cf, key_str)
+        }
+        for (key_str, _val, _) in
+            iter_diffs_prefix(self, rollback_cf, height, None, false)
+        {
+            batch.0.delete_cf(subspace_cf, key_str)
+        }
+        Ok(())
+    }
+
     #[inline]
     fn overwrite_entry(
         &self,
