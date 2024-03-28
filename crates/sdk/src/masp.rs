@@ -45,7 +45,7 @@ use masp_primitives::transaction::{
     TransparentAddress, Unauthorized,
 };
 use masp_primitives::zip32::{ExtendedFullViewingKey, ExtendedSpendingKey};
-use masp_proofs::bellman::groth16::PreparedVerifyingKey;
+use masp_proofs::bellman::groth16::{PreparedVerifyingKey, VerifyingKey};
 use masp_proofs::bls12_381::Bls12;
 use masp_proofs::prover::LocalTxProver;
 #[cfg(not(feature = "testing"))]
@@ -152,12 +152,16 @@ pub enum TransferErr {
 
 /// MASP verifying keys
 pub struct PVKs {
+    //FIXME: adjust this if needed
     /// spend verifying key
     pub spend_vk: PreparedVerifyingKey<Bls12>,
     /// convert verifying key
     pub convert_vk: PreparedVerifyingKey<Bls12>,
     /// output verifying key
     pub output_vk: PreparedVerifyingKey<Bls12>,
+    pub svk: VerifyingKey<Bls12>,
+    pub cvk: VerifyingKey<Bls12>,
+    pub ovk: VerifyingKey<Bls12>,
 }
 
 lazy_static! {
@@ -193,7 +197,10 @@ lazy_static! {
         PVKs {
             spend_vk: params.spend_vk,
             convert_vk: params.convert_vk,
-            output_vk: params.output_vk
+            output_vk: params.output_vk,
+            svk: params.spend_params.vk,
+            cvk: params.convert_params.vk,
+            ovk: params.output_params.vk,
         }
     };
 }
@@ -287,6 +294,7 @@ impl Authorization for PartialAuthorized {
 }
 
 /// Partially deauthorize the transparent bundle
+//FIXME: should deauthorize also the sapling bundle?
 pub fn partial_deauthorize(
     tx_data: &TransactionData<Authorized>,
 ) -> Option<TransactionData<PartialAuthorized>> {
@@ -309,6 +317,37 @@ pub fn partial_deauthorize(
     if tx_data.transparent_bundle().is_some() != transp.is_some() {
         return None;
     }
+    // let sapling= tx_data.sapling_bundle().and_then(|x| {
+    //         let mut sb = SaplingBuilder::new(, )
+    //         let mut tb = TransparentBuilder::empty();
+    //         for vin in &x.vin {
+    //             tb.add_input(TxOut {
+    //                 asset_type: vin.asset_type,
+    //                 value: vin.value,
+    //                 address: vin.address,
+    //             })
+    //             .ok()?;
+    //         }
+    //         for vout in &x.vout {
+    //             tb.add_output(&vout.address, vout.asset_type, vout.value)
+    //                 .ok()?;
+    //         }
+    //         tb.build()
+    //     });
+    //     if tx_data.sapling_bundle().is_some() != sapling.is_some() {
+    //         return None;
+    //     }
+
+    // //FIXME: unwrap
+    // let mut sapling = tx_data.sapling_bundle().cloned();
+    // if let Some(b) = &mut sapling {
+    //     b.authorization =
+    //         masp_primitives::transaction::components::sapling::Unproven;
+    // }
+
+    //FIXME: using the local version of the masp repo it seems to be working but it shouldn't be any different tha nthe remote one
+    //FIXME: actually using revision remotes/origin/murisi/expose-sapling-verification-context-inner~1
+    //FIXME: maybe need to rework the benches for the new logic
     Some(TransactionData::from_parts(
         tx_data.version(),
         tx_data.consensus_branch_id(),
@@ -329,6 +368,7 @@ where
 {
     tracing::info!("entered verify_shielded_tx()");
 
+    //FIXME: use this instead of the clone and unwrap at the end
     let sapling_bundle = if let Some(bundle) = transaction.sapling_bundle() {
         bundle
     } else {
@@ -355,48 +395,75 @@ where
         spend_vk,
         convert_vk,
         output_vk,
+        svk,
+        cvk,
+        ovk,
     } = load_pvks();
 
+    eprintln!("AFTER LOAD VKS"); //FIXME: remove
+
+    // FIXME: review this
+    //FIXME: I think I needthis for integration tests?
+    // #[cfg(not(feature = "testing"))]
+    // let mut ctx = SaplingVerificationContext::new(true);
+    // #[cfg(feature = "testing")]
+    // let mut ctx = testing::MockSaplingVerificationContext::new(true);
+    // for spend in &sapling_bundle.shielded_spends {
+    //     consume_verify_gas(namada_gas::MASP_VERIFY_SPEND_GAS)?;
+    //     if !check_spend(spend, sighash.as_ref(), &mut ctx, spend_vk) {
+    //         return Ok(false);
+    //     }
+    // }
+    // for convert in &sapling_bundle.shielded_converts {
+    //     consume_verify_gas(namada_gas::MASP_VERIFY_CONVERT_GAS)?;
+    //     if !check_convert(convert, &mut ctx, convert_vk) {
+    //         return Ok(false);
+    //     }
+    // }
+    // for output in &sapling_bundle.shielded_outputs {
+    //     consume_verify_gas(namada_gas::MASP_VERIFY_OUTPUT_GAS)?;
+    //     if !check_output(output, &mut ctx, output_vk) {
+    //         return Ok(false);
+    //     }
+    // }
+
+    // tracing::info!("passed spend/output verification");
+
+    // let assets_and_values: I128Sum = sapling_bundle.value_balance.clone();
+
+    // tracing::info!(
+    //     "accumulated {} assets/values",
+    //     assets_and_values.components().len()
+    // );
+
+    // consume_verify_gas(namada_gas::MASP_VERIFY_FINAL_GAS)?;
+    // let result = ctx.final_check(
+    //     assets_and_values,
+    //     sighash.as_ref(),
+    //     sapling_bundle.authorization.binding_sig,
+    // );
+    // tracing::info!("final check result {result}");
+
     #[cfg(not(feature = "testing"))]
-    let mut ctx = SaplingVerificationContext::new(true);
+    let mut validator = masp_proofs::sapling::BatchValidator::new();
     #[cfg(feature = "testing")]
-    let mut ctx = testing::MockSaplingVerificationContext::new(true);
-    for spend in &sapling_bundle.shielded_spends {
-        consume_verify_gas(namada_gas::MASP_VERIFY_SPEND_GAS)?;
-        if !check_spend(spend, sighash.as_ref(), &mut ctx, spend_vk) {
-            return Ok(false);
-        }
+    let mut validator = testing::MockSaplingVerificationContext::new(true);
+
+    //FIXME: charge gas
+    //FIXME: unwrap and clone
+    //FIXME: as_ref and clone
+    if !validator.check_bundle(
+        transaction.sapling_bundle().unwrap().clone(),
+        sighash.as_ref().clone(),
+    ) {
+        return Ok(false);
     }
-    for convert in &sapling_bundle.shielded_converts {
-        consume_verify_gas(namada_gas::MASP_VERIFY_CONVERT_GAS)?;
-        if !check_convert(convert, &mut ctx, convert_vk) {
-            return Ok(false);
-        }
-    }
-    for output in &sapling_bundle.shielded_outputs {
-        consume_verify_gas(namada_gas::MASP_VERIFY_OUTPUT_GAS)?;
-        if !check_output(output, &mut ctx, output_vk) {
-            return Ok(false);
-        }
-    }
-
-    tracing::info!("passed spend/output verification");
-
-    let assets_and_values: I128Sum = sapling_bundle.value_balance.clone();
-
-    tracing::info!(
-        "accumulated {} assets/values",
-        assets_and_values.components().len()
-    );
-
-    consume_verify_gas(namada_gas::MASP_VERIFY_FINAL_GAS)?;
-    let result = ctx.final_check(
-        assets_and_values,
-        sighash.as_ref(),
-        sapling_bundle.authorization.binding_sig,
-    );
-    tracing::info!("final check result {result}");
-    Ok(result)
+    eprintln!("AFTER CHECK BUNDLE"); //FIXME: remove
+                                     //FIXME: charge gas
+                                     //FIXME: error here somehow
+    Ok(validator.validate(svk, cvk, ovk, OsRng))
+    //FIXME: remove
+    // Ok(result)
 }
 
 /// Get the path to MASP parameters from [`ENV_VAR_MASP_PARAMS_DIR`] env var or
@@ -2869,8 +2936,11 @@ pub mod testing {
     use masp_primitives::sapling::prover::TxProver;
     use masp_primitives::sapling::redjubjub::Signature;
     use masp_primitives::sapling::{ProofGenerationKey, Rseed};
+    use masp_primitives::transaction::components::sapling::Bundle;
     use masp_primitives::transaction::components::GROTH_PROOF_SIZE;
     use masp_proofs::bellman::groth16::Proof;
+    use masp_proofs::sapling::BatchValidator;
+    use namada_core::tendermint::public_key::Secp256k1;
     use proptest::prelude::*;
     use proptest::sample::SizeRange;
     use proptest::test_runner::TestRng;
@@ -2890,9 +2960,13 @@ pub mod testing {
 
     /// A context object for verifying the Sapling components of a single Zcash
     /// transaction. Same as SaplingVerificationContext, but always assumes the
-    /// proofs to be valid.
+    /// proofs and signatures to be valid.
+    //FIXME: what to do with this? I think I need to update this for integration tests
+    //FIXME: I can probably remvoe the old functions? Maybe we can keep them anyway just in case
+    //FIXME: also see if benches work
     pub struct MockSaplingVerificationContext {
         inner: SaplingVerificationContextInner,
+        inner_batch: BatchValidator,
         zip216_enabled: bool,
     }
 
@@ -2901,6 +2975,7 @@ pub mod testing {
         pub fn new(zip216_enabled: bool) -> Self {
             MockSaplingVerificationContext {
                 inner: SaplingVerificationContextInner::new(),
+                inner_batch: BatchValidator::new(),
                 zip216_enabled,
             }
         }
@@ -3002,6 +3077,39 @@ pub mod testing {
                     )
                 },
             )
+        }
+
+        /// Checks the bundle against Sapling-specific consensus rules, and adds its proof and
+        /// signatures to the validator.
+        ///
+        /// Returns `false` if the bundle doesn't satisfy all of the consensus rules. This
+        /// `BatchValidator` can continue to be used regardless, but some or all of the proofs
+        /// and signatures from this bundle may have already been added to the batch even if
+        /// it fails other consensus rules.
+        pub fn check_bundle(
+            &mut self,
+            bundle: Bundle<
+                masp_primitives::transaction::components::sapling::Authorized,
+            >,
+            sighash: [u8; 32],
+        ) -> bool {
+            self.inner_batch.check_bundle(bundle, sighash)
+        }
+
+        /// Batch-validates the accumulated bundles.
+        ///
+        /// Returns `true` if every proof and signature in every bundle added to the batch
+        /// validator is valid, or `false` if one or more are invalid. No attempt is made to
+        /// figure out which of the accumulated bundles might be invalid; if that information
+        /// is desired, construct separate [`BatchValidator`]s for sub-batches of the bundles.
+        pub fn validate<R: RngCore + CryptoRng>(
+            self,
+            spend_vk: &VerifyingKey<Bls12>,
+            convert_vk: &VerifyingKey<Bls12>,
+            output_vk: &VerifyingKey<Bls12>,
+            rng: R,
+        ) -> bool {
+            true
         }
     }
 

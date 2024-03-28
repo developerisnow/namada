@@ -1018,6 +1018,8 @@ impl BenchShieldedCtx {
             StdIo,
             native_token,
         );
+        //FIXME: benches are still failing for the signature, myabe the client in the bench doesn't produce a valid one
+        //FIXME: this is a problem, for the benchmarks we need valid signatures
         let shielded = async_runtime
             .block_on(
                 ShieldedContext::<BenchShieldedUtils>::gen_shielded_transfer(

@@ -340,10 +340,15 @@ dependencies = [
  "bitvec",
  "blake2s_simd",
  "byteorder",
+ "crossbeam-channel 0.5.8",
  "ff",
  "group",
+ "lazy_static",
+ "log",
+ "num_cpus",
  "pairing",
  "rand_core 0.6.4",
+ "rayon",
  "subtle 2.4.1",
 ]
 
@@ -976,6 +981,16 @@ checksum = "b153fe7cbef478c567df0f972e02e6d736db11affe43dfc9c56a9374d1adfb87"
 dependencies = [
  "crossbeam-utils 0.7.2",
  "maybe-uninit",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a33c2bf77f2df06183c3aa30d1e96c0695a313d4f9c453cc3762a6db39f99200"
+dependencies = [
+ "cfg-if 1.0.0",
+ "crossbeam-utils 0.8.16",
 ]
 
 [[package]]
@@ -3134,7 +3149,6 @@ dependencies = [
 [[package]]
 name = "masp_note_encryption"
 version = "1.0.0"
-source = "git+https://github.com/anoma/masp?rev=30492323d98b0531fd18b6285cd94afcaa4066d2#30492323d98b0531fd18b6285cd94afcaa4066d2"
 dependencies = [
  "borsh",
  "chacha20",
@@ -3147,7 +3161,6 @@ dependencies = [
 [[package]]
 name = "masp_primitives"
 version = "1.0.0"
-source = "git+https://github.com/anoma/masp?rev=30492323d98b0531fd18b6285cd94afcaa4066d2#30492323d98b0531fd18b6285cd94afcaa4066d2"
 dependencies = [
  "aes",
  "bip0039",
@@ -3179,7 +3192,6 @@ dependencies = [
 [[package]]
 name = "masp_proofs"
 version = "1.0.0"
-source = "git+https://github.com/anoma/masp?rev=30492323d98b0531fd18b6285cd94afcaa4066d2#30492323d98b0531fd18b6285cd94afcaa4066d2"
 dependencies = [
  "bellman",
  "blake2b_simd",
@@ -5808,7 +5820,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94aecbdccbc4b557649b2d1b1a4bfc27ec85205e00fb8020fce044245a4c9e3f"
 dependencies = [
  "contracts",
- "crossbeam-channel",
+ "crossbeam-channel 0.4.4",
  "derive_more",
  "flex-error",
  "futures",

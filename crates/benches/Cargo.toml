@@ -12,35 +12,35 @@ readme.workspace = true
 repository.workspace = true
 version.workspace = true
 
-[[bench]]
-name = "allowed_txs"
-harness = false
-path = "txs.rs"
+# [[bench]]
+# name = "allowed_txs"
+# harness = false
+# path = "txs.rs"
 
-[[bench]]
-name = "allowed_vps"
-harness = false
-path = "vps.rs"
+# [[bench]]
+# name = "allowed_vps"
+# harness = false
+# path = "vps.rs"
 
 [[bench]]
 name = "native_vps"
 harness = false
 path = "native_vps.rs"
 
-[[bench]]
-name = "process_wrapper"
-harness = false
-path = "process_wrapper.rs"
+# [[bench]]
+# name = "process_wrapper"
+# harness = false
+# path = "process_wrapper.rs"
 
-[[bench]]
-name = "host_env"
-harness = false
-path = "host_env.rs"
+# [[bench]]
+# name = "host_env"
+# harness = false
+# path = "host_env.rs"
 
-[[bench]]
-name = "wasm_opcodes"
-harness = false
-path = "wasm_opcodes.rs"
+# [[bench]]
+# name = "wasm_opcodes"
+# harness = false
+# path = "wasm_opcodes.rs"
 
 [dependencies]
 

@@ -407,6 +407,7 @@ where
         keys_changed: &BTreeSet<Key>,
         _verifiers: &BTreeSet<Address>,
     ) -> Result<bool> {
+        eprintln!("IN MASP VP"); //FIXME: remove
         let epoch = self.ctx.get_block_epoch()?;
         let conversion_state = self.ctx.state.in_mem().get_conversion_state();
         let shielded_tx = self.ctx.get_shielded_action(tx_data)?;
@@ -727,6 +728,7 @@ where
         }
 
         // Verify the proofs
+        eprintln!("BEFORE VERIFY SHIELDED"); //FIXME: remove
         verify_shielded_tx(&shielded_tx, |gas| self.ctx.charge_gas(gas))
             .map_err(Error::NativeVpError)
     }
